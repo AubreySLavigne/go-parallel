@@ -2,64 +2,87 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
-	"runtime/trace"
+	"runtime"
+	"sync"
 )
 
-func main() {
-	out, _ := os.Create("trace.out")
-	trace.Start(out)
-	defer trace.Stop()
+var numProcesses int
 
-	runner := NewWorkGroup(8)
+func init() {
+	flag.IntVar(&numProcesses, "j", runtime.NumCPU(), "Max number of coroutines to use")
+	flag.Parse()
+}
+
+func main() {
+
+	var command string
+	if len(flag.Args()) > 0 {
+		command = flag.Args()[0]
+	} else {
+		command = "/usr/bin/md5sum"
+	}
+
+	runner := NewWorkGroup(numProcesses, command)
 	defer close(runner.inputPipeline)
 
-	command := "/usr/bin/md5sum"
-
 	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		runner.Run(command, scanner.Text())
-	}
+
+	runner.wg.Add(1)
+	go func() {
+		for scanner.Scan() {
+			runner.wg.Add(1)
+			runner.Run(scanner.Text())
+		}
+		runner.wg.Done()
+	}()
+
+	runner.wg.Wait()
 }
 
 // WorkGroup is a container for possible
 type WorkGroup struct {
+	wg            *sync.WaitGroup
 	inputPipeline chan string
 	size          int
 }
 
 // NewWorkGroup returns a workgroup and
-func NewWorkGroup(maxWorkers int) WorkGroup {
+func NewWorkGroup(maxWorkers int, command string) WorkGroup {
 
 	inputChannel := make(chan string)
-	for i := 1; i <= maxWorkers; i++ {
-		go Worker(inputChannel)
-	}
+
 	runner := WorkGroup{
+		wg:            &sync.WaitGroup{},
 		size:          maxWorkers,
 		inputPipeline: inputChannel,
+	}
+
+	for i := 1; i <= maxWorkers; i++ {
+		go Worker(runner.wg, command, inputChannel)
 	}
 
 	return runner
 }
 
 // Run starts the input for a single command
-func (runner *WorkGroup) Run(command string, input string) {
-	// fullCommand := fmt.Sprintf("%s '%s'", command, input)
+func (runner *WorkGroup) Run(input string) {
 	runner.inputPipeline <- input
 }
 
 // Worker is a single process running the command
-func Worker(inputChannel <-chan string) {
+func Worker(wg *sync.WaitGroup, command string, inputChannel <-chan string) {
 	for input := range inputChannel {
-		res, err := exec.Command("md5sum", input).Output()
+		res, err := exec.Command(command, input).Output()
 		if err != nil {
 			log.Println(err)
-			continue
+		} else {
+			fmt.Print(string(res))
 		}
-		fmt.Print(string(res))
+		wg.Done()
 	}
 }
